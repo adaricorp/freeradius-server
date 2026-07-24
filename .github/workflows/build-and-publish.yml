@@ -1,0 +1,211 @@
+name: Build and Publish freeradius-server Container Image
+
+on:
+  push:
+    branches:
+      - main
+      - master
+    paths:
+      # Rebuild when the pinned release or this workflow changes
+      - ".freeradius-version"
+      - ".github/workflows/build-and-publish.yml"
+  # Weekly rebuild of the SAME version tag, so the ubuntu:22.04 runtime base
+  # picks up OS security patches even when FreeRADIUS itself hasn't released.
+  # (Upstream does the same for their images, for the same reason.)
+  schedule:
+    - cron: "30 5 * * 1"
+  # Allow manual trigger — e.g. an out-of-band base-OS CVE rebuild
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: adaricorp/freeradius-server
+  # Upstream repo and dist we rebuild, unmodified. `ubuntu22` is upstream's
+  # DOCKER_DEFAULT_UBUNTU, i.e. what `freeradius/freeradius-server:<version>`
+  # on Docker Hub is built from.
+  UPSTREAM_REPO: FreeRADIUS/freeradius-server
+  UPSTREAM_DIST: ubuntu22
+
+jobs:
+  #
+  # Resolve the pinned release once, so every downstream job agrees on it.
+  #
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      minor: ${{ steps.version.outputs.minor }}
+      upstream_tag: ${{ steps.version.outputs.upstream_tag }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Resolve pinned FreeRADIUS release
+        id: version
+        run: |
+          set -euo pipefail
+          version="$(grep -oP '^FREERADIUS_VERSION=\K.*' .freeradius-version)"
+          if ! printf '%s' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::.freeradius-version must hold a three-part version, got '${version:-<empty>}'"
+            exit 1
+          fi
+          # Derive upstream's annotated release tag from the version. NOTE: we
+          # deliberately do NOT discover it via `git ls-remote --tags`, which is
+          # how upstream's own release workflow ends up with the *peeled* ref
+          # (`release_3_2_10^{}`) and dies on `invalid tag ... ^{}`.
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "minor=${version%.*}" >> "$GITHUB_OUTPUT"
+          echo "upstream_tag=release_${version//./_}" >> "$GITHUB_OUTPUT"
+          echo "Building FreeRADIUS $version from tag release_${version//./_}"
+
+  #
+  # One native runner per architecture. FreeRADIUS builds from source
+  # (mk-build-deps + dpkg-buildpackage), so QEMU-emulated arm64 would be slow
+  # and flaky — native runners keep it to a normal compile.
+  #
+  build:
+    needs: version
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            platform: linux/amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            platform: linux/arm64
+            runner: ubuntu-24.04-arm
+
+    name: build-${{ matrix.arch }}
+
+    steps:
+      # The build context is upstream's tree, unmodified — their Dockerfile
+      # does `COPY . .` and then `git checkout ${release}` inside the builder,
+      # so the checkout must carry full history and tags.
+      - name: Checkout upstream FreeRADIUS at the pinned release
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ env.UPSTREAM_REPO }}
+          ref: ${{ needs.version.outputs.upstream_tag }}
+          fetch-depth: 0
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Equivalent to upstream's own `make docker.ubuntu22.build`, minus the
+      # Makefile (which would want a configured tree). Same Dockerfile, same
+      # context, same `release` build-arg.
+      - name: Build and push per-arch image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ./scripts/docker/dists/${{ env.UPSTREAM_DIST }}/Dockerfile
+          push: true
+          platforms: ${{ matrix.platform }}
+          build-args: |
+            release=${{ needs.version.outputs.upstream_tag }}
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ matrix.arch }}-${{ needs.version.outputs.version }}
+          labels: |
+            org.opencontainers.image.title=freeradius-server
+            org.opencontainers.image.description=Multi-arch (amd64+arm64) rebuild of the official FreeRADIUS ubuntu22 image for Adari
+            org.opencontainers.image.version=${{ needs.version.outputs.version }}
+            org.opencontainers.image.source=https://github.com/adaricorp/freeradius-server
+            org.opencontainers.image.licenses=GPL-2.0-or-later
+            org.adari.upstream.repository=https://github.com/${{ env.UPSTREAM_REPO }}
+            org.adari.upstream.ref=${{ needs.version.outputs.upstream_tag }}
+            org.adari.upstream.dist=${{ env.UPSTREAM_DIST }}
+          cache-from: type=gha,scope=${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.arch }}
+          # Keep each arch a plain manifest (no attestation index) so the
+          # manifest-list merge below stays predictable.
+          provenance: false
+          sbom: false
+
+      # Smoke-test what we just built, natively, before it can reach a manifest
+      # list. Asserts the three things adarigod actually depends on: the binary
+      # runs on this arch, it IS the pinned version, and the uid-101 /
+      # /etc/raddb layout that `freeradius.py` hard-codes is intact.
+      - name: Smoke-test the built image
+        env:
+          WANT: ${{ needs.version.outputs.version }}
+          IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ matrix.arch }}-${{ needs.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          docker run --rm -e WANT --entrypoint /bin/sh "$IMAGE" -c '
+            set -eu
+            /usr/sbin/freeradius -v
+            /usr/sbin/freeradius -v | grep -F "Version $WANT"
+            id freerad | grep -E "uid=101\(freerad\) gid=101\(freerad\)"
+            test -L /etc/raddb
+            test -d /etc/freeradius
+          '
+
+  #
+  # Merge the per-arch images into the multi-arch manifest lists adarigod pins.
+  #
+  manifest:
+    needs:
+      - version
+      - build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Create multi-arch manifest lists
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+          MINOR: ${{ needs.version.outputs.minor }}
+        run: |
+          set -euo pipefail
+          repo="${REGISTRY}/${IMAGE_NAME}"
+          docker buildx imagetools create \
+            --tag "${repo}:${VERSION}" \
+            --tag "${repo}:${MINOR}" \
+            --tag "${repo}:latest" \
+            --tag "${repo}:sha-${GITHUB_SHA::7}" \
+            "${repo}:amd64-${VERSION}" \
+            "${repo}:arm64-${VERSION}"
+
+      # Belt-and-braces: the whole point of this repo is that both platforms
+      # are present, so fail loudly if the merge produced anything else.
+      - name: Verify the manifest list carries both platforms
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          repo="${REGISTRY}/${IMAGE_NAME}"
+          docker buildx imagetools inspect "${repo}:${VERSION}"
+          raw="$(docker buildx imagetools inspect "${repo}:${VERSION}" --raw)"
+          for want in linux/amd64 linux/arm64; do
+            if ! printf '%s' "$raw" | jq -e --arg p "$want" \
+                 '[.manifests[] | "\(.platform.os)/\(.platform.architecture)"] | index($p)' > /dev/null; then
+              echo "::error::${repo}:${VERSION} is missing $want"
+              exit 1
+            fi
+          done
+          echo "OK: ${repo}:${VERSION} publishes linux/amd64 + linux/arm64"

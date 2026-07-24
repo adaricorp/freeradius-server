@@ -1,0 +1,9 @@
+# The FreeRADIUS release this repo rebuilds and publishes.
+#
+# Single source of truth: the build workflow derives BOTH the upstream git tag
+# it builds (`release_3_2_10`) and the published image tag (`3.2.10`) from this
+# value, and then asserts that `freeradius -v` inside the built image reports
+# it. Tag and binaries therefore cannot drift.
+#
+# renovate: datasource=docker depName=freeradius/freeradius-server
+FREERADIUS_VERSION=3.2.10

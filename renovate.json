@@ -1,0 +1,26 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended",
+    ":rebaseStalePrs"
+  ],
+  "labels": ["Chore"],
+  "customManagers": [
+    {
+      "description": "Bump FREERADIUS_VERSION in .freeradius-version when upstream publishes a new release. The workflow derives the upstream git tag, the published image tag, and the post-build version assertion from this one value.",
+      "customType": "regex",
+      "managerFilePatterns": ["/^\\.freeradius-version$/"],
+      "matchStrings": [
+        "# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)\\s+FREERADIUS_VERSION=(?<currentValue>\\S+)"
+      ]
+    }
+  ],
+  "packageRules": [
+    {
+      "description": "Track upstream's own Docker Hub tags as the release signal — a tag there means the release_X_Y_Z git tag exists, which is what we actually build from. Restrict to the 3.2 stable series: 4.x is a separate development branch and moving to it must be a deliberate, tested decision, not a Renovate PR. The regex also excludes the `-alpine` variant tags.",
+      "matchDatasources": ["docker"],
+      "matchPackageNames": ["freeradius/freeradius-server"],
+      "allowedVersions": "/^3\\.2\\.\\d+$/"
+    }
+  ]
+}
