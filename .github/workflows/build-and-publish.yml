@@ -95,6 +95,14 @@ jobs:
           ref: ${{ needs.version.outputs.upstream_tag }}
           fetch-depth: 0
 
+      # This repo, for Dockerfile.adari (the layer that strips upstream's
+      # generated test keys). Kept in a subdirectory so upstream's tree stays
+      # the unmodified build context.
+      - name: Checkout this repo
+        uses: actions/checkout@v7
+        with:
+          path: adari
+
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v4
         with:
@@ -102,21 +110,54 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # The docker driver, so the stripped image below can be built FROM the
+      # upstream one without that one ever being pushed: it still carries the
+      # test keys. One platform per job, and no layer cache, so nothing the
+      # docker-container driver adds is needed.
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
+        with:
+          driver: docker
 
       # Equivalent to upstream's own `make docker.ubuntu22.build`, minus the
       # Makefile (which would want a configured tree). Same Dockerfile, same
       # context, same `release` build-arg.
-      - name: Build and push per-arch image
+      #
+      # No layer cache: the weekly run exists to pick up OS security fixes,
+      # and a cached `apt-get update` layer defeats that. Worse, it breaks the
+      # build: on 2026-09-21 and 09-28 the cached index named package
+      # versions the Ubuntu mirrors had already replaced, mk-build-deps got
+      # 404s, and the image has not been rebuilt since 09-14. `pull` takes a
+      # fresh ubuntu:22.04 base for the same reason.
+      - name: Build the per-arch upstream image (local only, never pushed)
         uses: docker/build-push-action@v7
         with:
           context: .
           file: ./scripts/docker/dists/${{ env.UPSTREAM_DIST }}/Dockerfile
-          push: true
+          load: true
+          pull: true
+          no-cache: true
           platforms: ${{ matrix.platform }}
           build-args: |
             release=${{ needs.version.outputs.upstream_tag }}
+          tags: freeradius-upstream:local
+          provenance: false
+          sbom: false
+
+      # Upstream's build runs raddb/certs' Makefile, which leaves a test CA
+      # with its private key, a signed client certificate and key and PKCS#12
+      # bundles in the image: identical in every copy of this public image,
+      # and enough to pass EAP-TLS against the stock eap module (adarigod
+      # issue 3754). Dockerfile.adari removes them over upstream's image.
+      - name: Build and push per-arch image without the test keys
+        uses: docker/build-push-action@v7
+        with:
+          context: ./adari
+          file: ./adari/Dockerfile.adari
+          push: true
+          platforms: ${{ matrix.platform }}
+          build-args: |
+            base=freeradius-upstream:local
           tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ matrix.arch }}-${{ needs.version.outputs.version }}
           labels: |
             org.opencontainers.image.title=freeradius-server
@@ -127,8 +168,6 @@ jobs:
             org.adari.upstream.repository=https://github.com/${{ env.UPSTREAM_REPO }}
             org.adari.upstream.ref=${{ needs.version.outputs.upstream_tag }}
             org.adari.upstream.dist=${{ env.UPSTREAM_DIST }}
-          cache-from: type=gha,scope=${{ matrix.arch }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.arch }}
           # Keep each arch a plain manifest (no attestation index) so the
           # manifest-list merge below stays predictable.
           provenance: false
@@ -151,6 +190,12 @@ jobs:
             id freerad | grep -E "uid=101\(freerad\) gid=101\(freerad\)"
             test -L /etc/raddb
             test -d /etc/freeradius
+            # The test CA key and the client keys are gone; only the server
+            # certificate the stock eap module loads still holds a key.
+            cd /etc/freeradius/certs
+            test ! -e ca.key
+            ! ls client.* user@example.org.* *.p12 >/dev/null 2>&1
+            test "$(grep -l "PRIVATE KEY" * 2>/dev/null)" = server.pem
           '
 
   #

@@ -1,0 +1,13 @@
+# Adari's layer over upstream's image (built unmodified by the workflow, then
+# passed in as `base`). Upstream's build runs raddb/certs' Makefile, which
+# makes a test CA *with its private key*, a signed client certificate and key,
+# and PKCS#12 bundles, all valid 60 days and identical in every copy of this
+# public image. Anyone holding them could pass EAP-TLS against the stock eap
+# module (adarigod #3754). Keep only what the stock eap module needs to load:
+# the CA certificate and the server certificate (server.pem).
+ARG base
+FROM ${base}
+RUN cd /etc/freeradius/certs \
+ && rm -f ca.key ca.der client.* user@example.org.* server.p12 server.key server.csr \
+          inner-server.* passwords.mk 01.pem 02.pem index.txt* serial* \
+ && ls -la /etc/freeradius/certs

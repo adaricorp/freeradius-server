@@ -39,9 +39,11 @@ See FreeRADIUS/freeradius-server#2780 (open since 2019) and adaricorp/adarigod
 
 ## How it works
 
-There is **no Dockerfile in this repo**, and nothing is forked. The build
-checks out upstream at the pinned release tag and builds *their* unmodified
-`scripts/docker/dists/ubuntu22/Dockerfile` — the same dist their own
+Nothing is forked. The build checks out upstream at the pinned release tag and
+builds *their* unmodified `scripts/docker/dists/ubuntu22/Dockerfile`, then
+puts one small layer of ours over it, `Dockerfile.adari` (see "Test keys"
+below). The upstream build stays on the runner; only the image with our layer
+is pushed. Upstream's Dockerfile is the same dist their own
 `freeradius/freeradius-server:<version>` is built from
 (`DOCKER_DEFAULT_UBUNTU := ubuntu22`; the published 3.2.10 image carries
 `LABEL org.opencontainers.image.version=22.04`).
@@ -123,3 +125,21 @@ $ docker inspect ghcr.io/adaricorp/freeradius-server:3.2.10 \
   ...
 }
 ```
+
+## Test keys
+
+Upstream's build runs `raddb/certs`' Makefile, which leaves a test CA **with
+its private key**, a signed client certificate and key, and PKCS#12 bundles
+under `/etc/freeradius/certs`, valid 60 days from the build. Every copy of
+this public image carries the same ones, and the stock `eap` module trusts
+that CA, so anyone holding them could pass EAP-TLS (adarigod issue 3754).
+`Dockerfile.adari` deletes them, keeping only `ca.pem` and `server.pem`,
+which the stock `eap` module needs in order to load. The smoke test fails the
+build if a test key comes back.
+
+## Weekly rebuild
+
+The schedule rebuilds the same version every Monday, with no layer cache and a
+freshly pulled base, so the image picks up Ubuntu security fixes. GitHub
+disables a public repository's scheduled workflows after 60 days without a
+commit; when that happens, re-enable the workflow under Actions.
