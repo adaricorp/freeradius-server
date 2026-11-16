@@ -254,3 +254,21 @@ jobs:
             fi
           done
           echo "OK: ${repo}:${VERSION} publishes linux/amd64 + linux/arm64"
+
+  #
+  # GitHub switches a public repository's scheduled workflows off after 60
+  # days without a commit, and commits here are rare: the pinned version moves
+  # a few times a year. That is how the weekly rebuild stopped on 2026-09-28.
+  # Re-enabling this workflow through the API on every run keeps the schedule
+  # alive without dummy commits. Its own job with no `needs`, so a failed
+  # build cannot skip it.
+  #
+  keepalive:
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - name: Keep this workflow enabled
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api --method PUT "repos/${GITHUB_REPOSITORY}/actions/workflows/build-and-publish.yml/enable"

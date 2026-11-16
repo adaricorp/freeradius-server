@@ -141,5 +141,7 @@ build if a test key comes back.
 
 The schedule rebuilds the same version every Monday, with no layer cache and a
 freshly pulled base, so the image picks up Ubuntu security fixes. GitHub
-disables a public repository's scheduled workflows after 60 days without a
-commit; when that happens, re-enable the workflow under Actions.
+switches a public repository's scheduled workflows off after 60 days without a
+commit, so every run also re-enables the workflow through the API (the
+`keepalive` job). If the workflow is ever off all the same, re-enable it under
+Actions.
