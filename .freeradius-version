@@ -6,4 +6,4 @@
 # it. Tag and binaries therefore cannot drift.
 #
 # renovate: datasource=docker depName=freeradius/freeradius-server
-FREERADIUS_VERSION=3.2.10
+FREERADIUS_VERSION=3.2.11
